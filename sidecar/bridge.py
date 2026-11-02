@@ -250,3 +250,70 @@ class Presence:
     def _schedule_retry(self, now):
         self.next_retry = now + self.backoff
         self.backoff = min(self.backoff * 2, MAX_BACKOFF)
+
+
+def make_handler(presence, secret):
+    expected = f"Bearer {secret}".encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/health":
+                return self.reply(404)
+            self.reply(200 if presence.connected else 503)
+
+        def do_POST(self):
+            if self.path != "/event":
+                return self.reply(404)
+            token = self.headers.get("Authorization", "").encode("latin-1", "replace")
+            if not hmac.compare_digest(token, expected):
+                return self.reply(401)
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                return self.reply(400)
+            if length < 0:
+                return self.reply(400)
+            if length > MAX_BODY:
+                return self.reply(413)
+            try:
+                event = parse_event(self.rfile.read(length))
+            except ValueError:
+                return self.reply(400)
+            presence.update(event)
+            self.reply(204)
+
+        def reply(self, status):
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    return Handler
+
+
+def load_config(env):
+    client_id = env.get("CLIENT_ID", "")
+    secret = env.get("BRIDGE_SECRET", "")
+    if not client_id:
+        sys.exit("bridge: CLIENT_ID is required")
+    if len(secret) < 16:
+        sys.exit("bridge: BRIDGE_SECRET must be at least 16 characters")
+    return client_id, secret, int(env.get("BRIDGE_PORT", "7878"))
+
+
+def main():
+    client_id, secret, port = load_config(os.environ)
+    path = os.path.join(os.environ["XDG_RUNTIME_DIR"], "discord-ipc-0")
+    presence = Presence(IpcClient(path, client_id))
+    server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(presence, secret))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"listening on port {port}")
+    while True:
+        presence.tick(time.time())
+        time.sleep(0.25)
+
+
+if __name__ == "__main__":
+    main()

@@ -340,3 +340,82 @@ class IpcClientTest(unittest.TestCase):
 
     def test_alive_is_false_before_connecting(self):
         self.assertFalse(bridge.IpcClient(self.path, "123").alive())
+SECRET = "0123456789abcdef"
+
+
+class HttpTest(unittest.TestCase):
+    def setUp(self):
+        self.client = FakeClient()
+        self.presence = bridge.Presence(self.client)
+        handler = bridge.make_handler(self.presence, SECRET)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def call(self, path, body=None, secret=SECRET, headers=None):
+        request = urllib.request.Request(self.base + path, data=body)
+        if secret:
+            request.add_header("Authorization", f"Bearer {secret}")
+        for key, value in (headers or {}).items():
+            request.add_header(key, value)
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return response.status, response.read()
+        except urllib.error.HTTPError as err:
+            with err:
+                return err.code, err.read()
+
+    def test_event_is_applied(self):
+        status, _ = self.call("/event", json.dumps(event()).encode())
+        self.assertEqual(status, 204)
+        self.assertEqual(self.presence.activity["details"], "Song")
+
+    def test_wrong_or_missing_secret_is_refused(self):
+        for secret in ("wrong", None, "é"):
+            status, _ = self.call("/event", json.dumps(event()).encode(), secret=secret)
+            self.assertEqual(status, 401, secret)
+        self.assertIsNone(self.presence.activity)
+
+    def test_invalid_body_is_refused(self):
+        status, _ = self.call("/event", b"nope")
+        self.assertEqual(status, 400)
+
+    def test_large_body_is_refused(self):
+        status, _ = self.call("/event", b"x" * (16 * 1024 + 1))
+        self.assertEqual(status, 413)
+
+    def test_body_at_the_limit_is_read(self):
+        status, _ = self.call("/event", b" " * (16 * 1024))
+        self.assertEqual(status, 400)
+
+    def test_bad_content_length_is_refused(self):
+        status, _ = self.call("/event", b"{}", headers={"Content-Length": "-5"})
+        self.assertEqual(status, 400)
+
+    def test_health_follows_the_socket_without_a_secret(self):
+        status, body = self.call("/health", secret=None)
+        self.assertEqual(status, 503)
+        self.presence.tick(1000)
+        status, body = self.call("/health", secret=None)
+        self.assertEqual((status, body), (200, b""))
+
+    def test_unknown_paths_are_not_found(self):
+        self.assertEqual(self.call("/nope")[0], 404)
+        self.assertEqual(self.call("/nope", b"{}")[0], 404)
+
+
+class LoadConfigTest(unittest.TestCase):
+    def test_defaults(self):
+        env = {"CLIENT_ID": "123", "BRIDGE_SECRET": SECRET}
+        self.assertEqual(bridge.load_config(env), ("123", SECRET, 7878))
+
+    def test_port_override(self):
+        env = {"CLIENT_ID": "123", "BRIDGE_SECRET": SECRET, "BRIDGE_PORT": "9000"}
+        self.assertEqual(bridge.load_config(env)[2], 9000)
+
+    def test_refuses_to_start_without_required_settings(self):
+        for env in ({}, {"CLIENT_ID": "123"}, {"CLIENT_ID": "123", "BRIDGE_SECRET": "short"}, {"BRIDGE_SECRET": SECRET}):
+            with self.assertRaises(SystemExit):
+                bridge.load_config(env)
