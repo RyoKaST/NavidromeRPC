@@ -409,7 +409,7 @@ class HttpTest(unittest.TestCase):
 class LoadConfigTest(unittest.TestCase):
     def test_defaults(self):
         env = {"CLIENT_ID": "123", "BRIDGE_SECRET": SECRET}
-        self.assertEqual(bridge.load_config(env), ("123", SECRET, 7878))
+        self.assertEqual(bridge.load_config(env), ("123", SECRET, 6464))
 
     def test_port_override(self):
         env = {"CLIENT_ID": "123", "BRIDGE_SECRET": SECRET, "BRIDGE_PORT": "9000"}

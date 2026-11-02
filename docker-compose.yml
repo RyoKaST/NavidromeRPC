@@ -1,0 +1,18 @@
+services:
+  navidrome-rpc:
+    build: ./sidecar
+    container_name: navidrome-rpc
+    restart: unless-stopped
+    shm_size: 256m
+    environment:
+      CLIENT_ID: ${CLIENT_ID:?set CLIENT_ID}
+      BRIDGE_SECRET: ${BRIDGE_SECRET:?set BRIDGE_SECRET}
+      LOGIN: ${LOGIN:-0}
+    ports:
+      - "6464:6464"
+      - "127.0.0.1:6080:6080"
+    volumes:
+      - vesktop-config:/home/vesktop/.config/vesktop
+
+volumes:
+  vesktop-config:

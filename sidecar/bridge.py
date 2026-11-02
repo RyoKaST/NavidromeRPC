@@ -300,7 +300,7 @@ def load_config(env):
         sys.exit("bridge: CLIENT_ID is required")
     if len(secret) < 16:
         sys.exit("bridge: BRIDGE_SECRET must be at least 16 characters")
-    return client_id, secret, int(env.get("BRIDGE_PORT", "7878"))
+    return client_id, secret, int(env.get("BRIDGE_PORT", "6464"))
 
 
 def main():
