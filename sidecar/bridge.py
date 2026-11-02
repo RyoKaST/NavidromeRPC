@@ -279,6 +279,7 @@ def make_handler(presence, secret):
                 event = parse_event(self.rfile.read(length))
             except ValueError:
                 return self.reply(400)
+            log(f"event: {event['state']} {event['title'] or ''}")
             presence.update(event)
             self.reply(204)
 

@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import socket
@@ -371,6 +373,12 @@ class HttpTest(unittest.TestCase):
         status, _ = self.call("/event", json.dumps(event()).encode())
         self.assertEqual(status, 204)
         self.assertEqual(self.presence.activity["details"], "Song")
+
+    def test_event_is_logged(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.call("/event", json.dumps(event()).encode())
+        self.assertIn("event: playing Song", output.getvalue())
 
     def test_wrong_or_missing_secret_is_refused(self):
         for secret in ("wrong", None, "é"):

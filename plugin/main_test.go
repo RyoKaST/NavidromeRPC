@@ -87,6 +87,15 @@ func TestIncompleteConfigDoesNothing(t *testing.T) {
 	}
 }
 
+func TestIncompleteConfigIsLogged(t *testing.T) {
+	config := fullConfig()
+	delete(config, bridgeURLKey)
+	setup(t, config)
+
+	(&presencePlugin{}).IsAuthorized(scrobbler.IsAuthorizedRequest{Username: "Lukas"})
+	pdk.PDKMock.AssertCalled(t, "Log", pdk.LogWarn, mock.Anything)
+}
+
 func TestOtherUsersAreIgnored(t *testing.T) {
 	setup(t, fullConfig())
 	input := report("playing")

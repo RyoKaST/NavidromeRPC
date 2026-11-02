@@ -43,7 +43,11 @@ func loadConfig() (config, bool) {
 		username:     username,
 		publicCovers: publicCovers == "true",
 	}
-	return cfg, cfg.bridgeURL != "" && cfg.bridgeSecret != "" && cfg.username != ""
+	ok := cfg.bridgeURL != "" && cfg.bridgeSecret != "" && cfg.username != ""
+	if !ok {
+		pdk.Log(pdk.LogWarn, "bridgeUrl, bridgeSecret and username are all required")
+	}
+	return cfg, ok
 }
 
 func (p *presencePlugin) IsAuthorized(input scrobbler.IsAuthorizedRequest) (bool, error) {
