@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/navidrome/navidrome/refs/heads/master/plugins/manifest-schema.json",
+  "name": "NavidromeRPC",
+  "author": "RyoKaST",
+  "version": "0.1.0",
+  "description": "Shows what you are playing on your Discord profile through a local Vesktop container",
+  "website": "https://github.com/RyoKaST/NavidromeRPC",
+  "permissions": {
+    "users": {
+      "reason": "To receive playback reports for the configured user"
+    },
+    "artwork": {
+      "reason": "To send Navidrome artwork URLs when publicCovers is on"
+    },
+    "http": {
+      "reason": "To send playback events to the bridge on your local network",
+      "requiredHosts": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+    }
+  },
+  "config": {
+    "schema": {
+      "type": "object",
+      "required": ["bridgeUrl", "bridgeSecret", "username"],
+      "properties": {
+        "bridgeUrl": {
+          "type": "string",
+          "title": "Bridge URL",
+          "description": "For example http://192.168.1.100:6464",
+          "pattern": "^https?://"
+        },
+        "bridgeSecret": {
+          "type": "string",
+          "title": "Bridge secret",
+          "description": "The BRIDGE_SECRET value from the container",
+          "minLength": 16
+        },
+        "username": {
+          "type": "string",
+          "title": "Navidrome username",
+          "description": "The user to follow, matched exactly"
+        },
+        "publicCovers": {
+          "type": "boolean",
+          "title": "Use Navidrome artwork",
+          "description": "Only turn this on if Navidrome is reachable from the internet",
+          "default": false
+        }
+      }
+    },
+    "uiSchema": {
+      "type": "VerticalLayout",
+      "elements": [
+        { "type": "Control", "scope": "#/properties/bridgeUrl" },
+        { "type": "Control", "scope": "#/properties/bridgeSecret", "options": { "format": "password" } },
+        { "type": "Control", "scope": "#/properties/username" },
+        { "type": "Control", "scope": "#/properties/publicCovers" }
+      ]
+    }
+  }
+}
