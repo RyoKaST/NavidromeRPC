@@ -108,3 +108,145 @@ def build_activity(event):
     end = int(start + length)
     activity["timestamps"]["end"] = end
     return activity, end / 1000
+
+
+def log(message):
+    print(f"bridge: {message}", flush=True)
+
+
+class IpcClient:
+    # frames are op and length as little-endian u32, then json
+    def __init__(self, path, client_id):
+        self.path = path
+        self.client_id = client_id
+        self.sock = None
+        self.nonce = 0
+
+    def connect(self):
+        self.close()
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.settimeout(5)
+        try:
+            self.sock.connect(self.path)
+            self._write(0, {"v": 1, "client_id": self.client_id})
+            self._read()
+        except (OSError, ValueError) as err:
+            self.close()
+            raise OSError(f"handshake failed: {err}") from err
+
+    def alive(self):
+        if self.sock is None:
+            return False
+        try:
+            readable, _, _ = select.select([self.sock], [], [], 0)
+            return not readable or bool(self.sock.recv(1, socket.MSG_PEEK))
+        except OSError:
+            return False
+
+    def set_activity(self, activity):
+        self.nonce += 1
+        nonce = str(self.nonce)
+        args = {"pid": os.getpid(), "activity": activity}
+        self._write(1, {"cmd": "SET_ACTIVITY", "args": args, "nonce": nonce})
+        try:
+            while self._read().get("nonce") != nonce:
+                pass
+        except ValueError as err:
+            raise OSError(f"bad reply: {err}") from err
+
+    def close(self):
+        if self.sock is not None:
+            self.sock.close()
+            self.sock = None
+
+    def _write(self, op, payload):
+        data = json.dumps(payload).encode()
+        self.sock.sendall(struct.pack("<II", op, len(data)) + data)
+
+    def _read(self):
+        op, length = struct.unpack("<II", self._read_exact(8))
+        payload = json.loads(self._read_exact(length))
+        if op == 2:
+            raise OSError(f"closed by Discord: {payload}")
+        return payload
+
+    def _read_exact(self, size):
+        data = b""
+        while len(data) < size:
+            chunk = self.sock.recv(size - len(data))
+            if not chunk:
+                raise OSError("socket closed")
+            data += chunk
+        return data
+
+
+class Presence:
+    def __init__(self, client):
+        self.client = client
+        self.lock = threading.Lock()
+        self.activity = None
+        self.ends_at = None
+        self.last_timestamp = 0
+        self.dirty = False
+        self.connected = False
+        self.last_sent = float("-inf")
+        self.backoff = MIN_BACKOFF
+        self.next_retry = 0
+
+    def update(self, event):
+        with self.lock:
+            if event["timestamp"] < self.last_timestamp:
+                return False
+            self.last_timestamp = event["timestamp"]
+            self.activity, self.ends_at = build_activity(event)
+            self.dirty = True
+            return True
+
+    def tick(self, now):
+        with self.lock:
+            if self.ends_at is not None and now > self.ends_at + STALE_SECONDS:
+                self.activity = None
+                self.ends_at = None
+                self.dirty = True
+            if self.connected and not self.client.alive():
+                log("socket closed")
+                self._disconnect(now)
+            if not self.connected and not self._connect(now):
+                return
+            if self.dirty and now - self.last_sent >= MIN_SEND_INTERVAL:
+                self._send(now)
+
+    def _connect(self, now):
+        if now < self.next_retry:
+            return False
+        try:
+            self.client.connect()
+        except OSError as err:
+            log(f"connect failed: {err}")
+            self._schedule_retry(now)
+            return False
+        log("connected")
+        self.connected = True
+        self.backoff = MIN_BACKOFF
+        self.dirty = True
+        return True
+
+    def _send(self, now):
+        try:
+            self.client.set_activity(self.activity)
+        except OSError as err:
+            log(f"send failed: {err}")
+            self._disconnect(now)
+            return
+        self.dirty = False
+        self.last_sent = now
+
+    def _disconnect(self, now):
+        self.client.close()
+        self.connected = False
+        self.dirty = True
+        self._schedule_retry(now)
+
+    def _schedule_retry(self, now):
+        self.next_retry = now + self.backoff
+        self.backoff = min(self.backoff * 2, MAX_BACKOFF)

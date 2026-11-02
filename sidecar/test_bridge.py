@@ -121,3 +121,222 @@ class BuildActivityTest(unittest.TestCase):
         for url in ("http://example.org/a.jpg", "file:///etc/passwd", "https://e.org/" + "a" * 300, ""):
             activity, _ = bridge.build_activity(parsed(coverUrl=url))
             self.assertNotIn("assets", activity, url)
+class FakeClient:
+    def __init__(self):
+        self.sent = []
+        self.connect_error = False
+        self.send_error = False
+        self.is_alive = True
+        self.connects = 0
+
+    def connect(self):
+        if self.connect_error:
+            raise OSError("no socket")
+        self.connects += 1
+        self.is_alive = True
+
+    def alive(self):
+        return self.is_alive
+
+    def set_activity(self, activity):
+        if self.send_error:
+            raise OSError("broken pipe")
+        self.sent.append(activity)
+
+    def close(self):
+        pass
+
+
+class PresenceTest(unittest.TestCase):
+    def setUp(self):
+        self.client = FakeClient()
+        self.presence = bridge.Presence(self.client)
+
+    def details(self):
+        return [a and a["details"] for a in self.client.sent]
+
+    def test_sends_the_activity(self):
+        self.presence.update(parsed())
+        self.presence.tick(1000)
+        self.assertEqual(self.details(), ["Song"])
+        self.assertTrue(self.presence.connected)
+
+    def test_does_not_resend_without_a_change(self):
+        self.presence.update(parsed())
+        self.presence.tick(1000)
+        self.presence.tick(1010)
+        self.assertEqual(len(self.client.sent), 1)
+
+    def test_rate_limit_keeps_only_the_latest_event(self):
+        self.presence.update(parsed(title="One"))
+        self.presence.tick(1000)
+        self.presence.update(parsed(title="Two"))
+        self.presence.update(parsed(title="Three"))
+        self.presence.tick(1001)
+        self.assertEqual(self.details(), ["One"])
+        self.presence.tick(1002)
+        self.assertEqual(self.details(), ["One", "Three"])
+
+    def test_stop_clears(self):
+        self.presence.update(parsed())
+        self.presence.tick(1000)
+        self.presence.update(parsed(state="stopped"))
+        self.presence.tick(1002)
+        self.assertEqual(self.details(), ["Song", None])
+
+    def test_older_event_is_ignored(self):
+        self.assertTrue(self.presence.update(parsed(title="New", timestamp=2000)))
+        self.assertFalse(self.presence.update(parsed(state="stopped", timestamp=1999)))
+        self.presence.tick(2000)
+        self.assertEqual(self.details(), ["New"])
+
+    def test_event_from_the_same_second_is_accepted(self):
+        self.presence.update(parsed(timestamp=2000))
+        self.assertTrue(self.presence.update(parsed(state="stopped", timestamp=2000)))
+
+    def test_stale_activity_clears_after_the_grace_period(self):
+        self.presence.update(parsed())
+        self.presence.tick(1000)
+        self.presence.tick(1180 + 60)
+        self.assertEqual(self.details(), ["Song"])
+        self.presence.tick(1180 + 61)
+        self.assertEqual(self.details(), ["Song", None])
+
+    def test_unknown_duration_never_goes_stale(self):
+        self.presence.update(parsed(durationMs=0))
+        self.presence.tick(1000)
+        self.presence.tick(1000000)
+        self.assertEqual(self.details(), ["Song"])
+
+    def test_paused_never_goes_stale(self):
+        self.presence.update(parsed(state="paused"))
+        self.presence.tick(1000)
+        self.presence.tick(1000000)
+        self.assertEqual(self.details(), ["Song"])
+
+    def test_connect_retries_with_capped_backoff(self):
+        self.client.connect_error = True
+        self.presence.update(parsed())
+        delays = []
+        now = 1000
+        for _ in range(8):
+            self.presence.tick(now)
+            delays.append(self.presence.next_retry - now)
+            now = self.presence.next_retry
+        self.assertEqual(delays, [1, 2, 4, 8, 16, 30, 30, 30])
+        self.assertFalse(self.presence.connected)
+
+    def test_waits_for_the_backoff_before_retrying(self):
+        self.client.connect_error = True
+        self.presence.tick(1000)
+        self.client.connect_error = False
+        self.presence.tick(1000.5)
+        self.assertEqual(self.client.connects, 0)
+        self.presence.tick(1001)
+        self.assertEqual(self.client.connects, 1)
+
+    def test_reconnect_restores_the_paused_status(self):
+        self.presence.update(parsed(state="paused"))
+        self.presence.tick(1000)
+        self.client.is_alive = False
+        self.presence.tick(1010)
+        self.assertFalse(self.presence.connected)
+        self.presence.tick(1011)
+        self.assertTrue(self.presence.connected)
+        self.assertEqual(len(self.client.sent), 2)
+        self.assertEqual(self.client.sent[1], self.client.sent[0])
+        self.assertNotIn("timestamps", self.client.sent[1])
+
+    def test_failed_send_is_retried_after_reconnecting(self):
+        self.presence.tick(1000)
+        self.client.send_error = True
+        self.presence.update(parsed())
+        self.presence.tick(1002)
+        self.assertFalse(self.presence.connected)
+        self.client.send_error = False
+        self.presence.tick(1003)
+        self.assertEqual(self.details(), [None, "Song"])
+
+    def test_connecting_clears_any_old_status(self):
+        self.presence.tick(1000)
+        self.assertEqual(self.client.sent, [None])
+
+
+class FakeDiscord:
+    def __init__(self, path):
+        self.commands = []
+        self.server = socket.socket(socket.AF_UNIX)
+        self.server.bind(path)
+        self.server.listen()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def read_frame(conn):
+        header = conn.recv(8, socket.MSG_WAITALL)
+        if len(header) < 8:
+            return None
+        op, length = struct.unpack("<II", header)
+        return op, json.loads(conn.recv(length, socket.MSG_WAITALL))
+
+    @staticmethod
+    def write_frame(conn, op, payload):
+        data = json.dumps(payload).encode()
+        conn.sendall(struct.pack("<II", op, len(data)) + data)
+
+    def run(self):
+        conn, _ = self.server.accept()
+        self.conn = conn
+        _, handshake = self.read_frame(conn)
+        self.client_id = handshake["client_id"]
+        self.write_frame(conn, 1, {"cmd": "DISPATCH", "evt": "READY"})
+        while True:
+            frame = self.read_frame(conn)
+            if frame is None:
+                return
+            self.commands.append(frame[1])
+            self.write_frame(conn, 1, {"evt": "OTHER"})
+            self.write_frame(conn, 1, {"cmd": "SET_ACTIVITY", "nonce": frame[1]["nonce"]})
+
+    def close(self):
+        self.conn.shutdown(socket.SHUT_RDWR)
+        self.conn.close()
+        self.server.close()
+
+
+class IpcClientTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.path = os.path.join(self.dir.name, "discord-ipc-0")
+
+    def test_handshake_and_set_activity(self):
+        discord = FakeDiscord(self.path)
+        client = bridge.IpcClient(self.path, "123")
+        client.connect()
+        client.set_activity({"details": "Song"})
+        client.set_activity(None)
+        client.close()
+        discord.thread.join(2)
+        self.assertEqual(discord.client_id, "123")
+        self.assertEqual(discord.commands[0]["cmd"], "SET_ACTIVITY")
+        self.assertEqual(discord.commands[0]["args"]["activity"], {"details": "Song"})
+        self.assertEqual(discord.commands[0]["args"]["pid"], os.getpid())
+        self.assertIsNone(discord.commands[1]["args"]["activity"])
+
+    def test_alive_notices_a_closed_socket(self):
+        discord = FakeDiscord(self.path)
+        client = bridge.IpcClient(self.path, "123")
+        client.connect()
+        self.assertTrue(client.alive())
+        discord.close()
+        discord.thread.join(2)
+        self.assertFalse(client.alive())
+        client.close()
+
+    def test_connect_fails_without_a_socket(self):
+        with self.assertRaises(OSError):
+            bridge.IpcClient(self.path, "123").connect()
+
+    def test_alive_is_false_before_connecting(self):
+        self.assertFalse(bridge.IpcClient(self.path, "123").alive())
