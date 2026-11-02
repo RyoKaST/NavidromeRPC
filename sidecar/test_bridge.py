@@ -123,6 +123,8 @@ class BuildActivityTest(unittest.TestCase):
         for url in ("http://example.org/a.jpg", "file:///etc/passwd", "https://e.org/" + "a" * 300, ""):
             activity, _ = bridge.build_activity(parsed(coverUrl=url))
             self.assertNotIn("assets", activity, url)
+
+
 class FakeClient:
     def __init__(self):
         self.sent = []
@@ -342,6 +344,8 @@ class IpcClientTest(unittest.TestCase):
 
     def test_alive_is_false_before_connecting(self):
         self.assertFalse(bridge.IpcClient(self.path, "123").alive())
+
+
 SECRET = "0123456789abcdef"
 
 

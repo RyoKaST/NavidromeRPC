@@ -22,8 +22,13 @@ fi
 
 python3 /bridge.py &
 # docker blocks chromium's sandbox
-vesktop --no-sandbox --disable-gpu --disable-dev-shm-usage --ozone-platform=x11 \
-  --enable-low-end-device-mode &
+while :; do
+  vesktop --no-sandbox --disable-gpu --disable-dev-shm-usage --ozone-platform=x11 \
+    --enable-low-end-device-mode || true
+  rm -f "$config/SingletonLock" "$config/SingletonSocket" "$config/SingletonCookie"
+  rm -f "$XDG_RUNTIME_DIR"/discord-ipc-*
+  sleep 2
+done &
 
 # go down with the first process so docker restarts everything
 wait -n
